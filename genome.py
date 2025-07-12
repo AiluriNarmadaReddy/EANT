@@ -15,6 +15,7 @@ class Genome:
         self.genes = genes if genes is not None else []
         self.next_id = self._calculate_next_id()
         self.depth = depth
+        self.sigmas = []  # Store mutation step sizes for each gene
         
     def _calculate_next_id(self) -> int:
         if not self.genes:
@@ -51,6 +52,9 @@ class Genome:
         
         # Update next_id
         self.next_id = next_vertex_id
+        
+        # Initialize sigmas for all genes
+        self.initialize_sigmas()
         
         # Validate the resulting genome
         valid, error = self.is_valid()
@@ -150,12 +154,19 @@ class Genome:
         # Update next_id
         self.next_id = next_vertex_id
         
+        # Initialize sigmas for all genes
+        self.initialize_sigmas()
+        
         # Validate the resulting genome
         valid, error = self.is_valid()
         if not valid:
             raise ValueError(f"Failed to create valid genome: {error}")
         
         return tree_boundaries
+    
+    def initialize_sigmas(self, initial_sigma: float = 0.5) -> None:
+        """Initialize mutation step sizes for each gene"""
+        self.sigmas = [initial_sigma for _ in self.genes]
         
     def calculate_v_values(self):
         """Calculate v(xi) values: 1-arity for vertex genes, 1 for other genes"""
@@ -347,6 +358,13 @@ class Genome:
         new_genome = Genome(self.depth)
         new_genome.next_id = self.next_id
         new_genome.genes = [gene.copy() for gene in self.genes]
+        
+        # Copy the sigma values if they exist
+        if hasattr(self, 'sigmas') and len(self.sigmas) == len(self.genes):
+            new_genome.sigmas = self.sigmas.copy()
+        else:
+            new_genome.initialize_sigmas()
+            
         return new_genome
     
     def calculate_tree_boundaries(self) -> List[Tuple[int, int]]:

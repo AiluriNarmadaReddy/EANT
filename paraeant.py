@@ -1,11 +1,12 @@
 import random
 import copy
 import numpy as np
+import math
 from typing import List, Tuple, Dict, Optional, Set, Union
 from enum import Enum
 from genome import Genome
 from neural_network_evaluator import NeuralNetworkEvaluator
-from genes import VertexGene, InputGene, ForwardJumperGene, RecurrentJumperGene, Gene
+from genome import VertexGene, InputGene, ForwardJumperGene, RecurrentJumperGene, Gene
 
 class MutationType(Enum):
     ADD_SUBNETWORK = 0
@@ -30,6 +31,10 @@ class EANT:
         self.buffer_length = 5        # How many generations to look back
         self.improvement_threshold = 0.2  # Minimum improvement required
         self.fitness_history = [] 
+        
+        # Parameters for self-adaptive mutation
+        self.min_sigma = 0.01  # ε₀ value from equation 2.6
+        self.initial_sigma = 0.5  # Initial step size
 
     def initialize_minimal_population(self) -> None:
         """Initialize population with minimal networks"""
@@ -76,40 +81,60 @@ class EANT:
         return mse_values
 
     def parametric_mutation(self, population: List[Genome], fitness_values: Dict[Genome, float]) -> List[Genome]:
-        """Apply parametric mutation to population based on cluster fitness"""
+        """Apply self-adaptive parametric mutation to population based on cluster fitness"""
         clusters = {}
         for genome in population:
             signature = self._get_structure_signature(genome)
             if signature not in clusters:
                 clusters[signature] = []
             clusters[signature].append(genome)
+        
+        # Calculate average fitness per cluster
         cluster_fitness = {}
         total_fitness_sum = 0
+        
         for signature, genomes in clusters.items():
+            # Get fitness values for genomes in this cluster
             cluster_genome_fitness = [fitness_values.get(g, float('-inf')) for g in genomes]
+            
+            # Calculate average fitness (Fk)
             avg_fitness = sum(cluster_genome_fitness) / len(cluster_genome_fitness)
             cluster_fitness[signature] = avg_fitness
-            total_fitness_sum += avg_fitness 
+            total_fitness_sum += avg_fitness  # Total fitness sum (Ft)
+        
+        # Create new population through fitness-proportional mutation
         new_population = []
         
         for signature, genomes in clusters.items():
-            if total_fitness_sum == 0:
+            # Calculate proportion of resources for this cluster: (Fk/Ft)
+            if total_fitness_sum == 0:  # Avoid division by zero
                 proportion = 1.0 / len(clusters)
             else:
                 proportion = cluster_fitness[signature] / total_fitness_sum
+            
+            # Calculate number of evaluations: ne = (Fk/Ft)PS
             num_evaluations = max(1, int(proportion * self.population_size))
+            
+            # Select best genome from cluster as representative
             best_genome = max(genomes, key=lambda g: fitness_values.get(g, float('-inf')))
+            
+            # Apply self-adaptive mutation multiple times based on allocated resources
             for _ in range(num_evaluations):
+                # Create a copy for mutation
                 mutated_genome = best_genome.copy()
-                for gene in mutated_genome.genes:
-                    if random.random() < self.mutation_prob:
-                        current_weight = gene.get_weight()
-                        sigma = 0.2
-                        new_weight = current_weight + random.gauss(0, sigma)
-                        gene.set_weight(new_weight)
+                
+                # Initialize sigmas if they don't exist or have wrong length
+                if not hasattr(mutated_genome, 'sigmas') or len(mutated_genome.sigmas) != len(mutated_genome.genes):
+                    mutated_genome.initialize_sigmas(self.initial_sigma)
+                
+                # Apply self-adaptive mutation
+                self._apply_self_adaptive_mutation(mutated_genome)
                 
                 new_population.append(mutated_genome)
+        
+        # Ensure population size is maintained
         if len(new_population) < self.population_size:
+            # If we have too few genomes, clone the best ones
             sorted_genomes = sorted(population, 
                                 key=lambda g: fitness_values.get(g, float('-inf')), 
                                 reverse=True)
@@ -117,12 +142,7 @@ class EANT:
                 for g in sorted_genomes:
                     if len(new_population) < self.population_size:
                         mutated = g.copy()
-                        # Apply small random perturbation to weights
-                        for gene in mutated.genes:
-                            if random.random() < self.mutation_prob:
-                                current_weight = gene.get_weight()
-                                new_weight = current_weight + random.uniform(-0.1, 0.1)
-                                gene.set_weight(new_weight)
+                        self._apply_self_adaptive_mutation(mutated)
                         new_population.append(mutated)
                     else:
                         break
@@ -131,6 +151,38 @@ class EANT:
             new_population = new_population[:self.population_size]
         
         return new_population
+    
+    def _apply_self_adaptive_mutation(self, genome):
+        """Apply the self-adaptive mutation mechanism based on equations 2.4-2.6"""
+        n = len(genome.genes)
+        
+        # Calculate tau values as per the equations
+        tau_prime = 1.0 / math.sqrt(2.0 * n)
+        tau = 1.0 / math.sqrt(2.0 * math.sqrt(n))
+        
+        # Global random factor that affects all step sizes
+        global_factor = np.random.normal(0, 1)
+        
+        # Update step sizes (sigmas) for each gene
+        for i in range(len(genome.genes)):
+            # Generate individual random factor
+            individual_factor = np.random.normal(0, 1)
+            
+            # Update sigma according to equation 2.4
+            genome.sigmas[i] *= math.exp(tau_prime * global_factor + tau * individual_factor)
+            
+            # Apply boundary rule (equation 2.6)
+            if genome.sigmas[i] < self.min_sigma:
+                genome.sigmas[i] = self.min_sigma
+            
+            # Apply mutation to weights according to equation 2.5
+            if random.random() < self.mutation_prob:
+                current_weight = genome.genes[i].get_weight()
+                random_factor = np.random.normal(0, 1)
+                new_weight = current_weight + genome.sigmas[i] * random_factor
+                genome.genes[i].set_weight(new_weight)
+        
+        return genome
     
     def structural_mutation(self, genome: Genome, mutation_prob=None) -> Genome:
         """Add/remove structure through mutation"""
@@ -170,6 +222,15 @@ class EANT:
                 print(f"Can't remove from vertex {vertex_to_mutate.id} with arity 1, added connection instead")
         valid, error = new_genome.is_valid()
         if valid:
+            # Update sigmas to match new genome structure
+            if len(new_genome.sigmas) != len(new_genome.genes):
+                # Add new sigmas for any new genes
+                old_len = len(new_genome.sigmas)
+                new_len = len(new_genome.genes)
+                if old_len < new_len:
+                    new_genome.sigmas.extend([self.initial_sigma] * (new_len - old_len))
+                else:
+                    new_genome.sigmas = new_genome.sigmas[:new_len]
             return new_genome
         else:
             print(f"Mutation rejected - invalid genome: {error}")
@@ -276,8 +337,14 @@ class EANT:
         return f"V{vertex_count}I{input_count}JF{forward_jumper_count}JR{recurrent_jumper_count}" 
      
     def should_explore(self) -> bool:
+        """
+        Determine if we should explore new structures based on fitness improvement.
+        Returns True if improvement is below threshold (need to explore).
+        """
+        # Need at least buffer_length+1 generations of history
         if len(self.fitness_history) <= self.buffer_length:
             return False
+        # Calculate improvement over the buffer period
         current_fitness = self.fitness_history[-1]
         previous_fitness = self.fitness_history[-self.buffer_length-1]
         improvement = current_fitness - previous_fitness
@@ -293,13 +360,17 @@ class EANT:
         fitness_values = [-mse for mse in mse_values]
         selected_genomes = []
         selected_tree_boundaries = []
+        #ELITISM: First, always include the best genome ever found
         if self.best_genome is not None:
             selected_genomes.append(self.best_genome.copy())
             selected_tree_boundaries.append(self.best_tree_boundaries.copy())
             print("Added best genome through elitism")
+        
+        # 2. PROTECTION: Include all protected genomes
         for i, (genome, tree_boundaries, timer) in enumerate(zip(
                 self.protected_genomes, self.protected_tree_boundaries, self.protection_timers)):
             if timer > 0:
+                # Only add if not already added through elitism
                 genome_signature = self._get_structure_signature(genome)
                 already_included = False
                 
@@ -313,6 +384,7 @@ class EANT:
                     selected_tree_boundaries.append(tree_boundaries.copy())
                     self.protection_timers[i] -= 1
                     print(f"Protected genome remains for {self.protection_timers[i]} more generations")
+        # 3. DIVERSITY: Group genomes by structure (clustering)
         clusters = {}
         for i, genome in enumerate(self.population):
             signature = self._get_structure_signature(genome)
@@ -321,6 +393,8 @@ class EANT:
             clusters[signature].append((i, genome, fitness_values[i]))  # Store index, genome, and fitness
         
         print(f"Found {len(clusters)} different structural clusters")
+        
+        # Select the best genome from each structural cluster
         for signature, genomes in clusters.items():
             already_included = False
             for g in selected_genomes:
@@ -331,25 +405,39 @@ class EANT:
             if not already_included and len(selected_genomes) < self.population_size:
                 # Get the best genome from this cluster
                 best_idx, best_genome, _ = max(genomes, key=lambda x: x[2])  # Sort by fitness
+                
+                # Add to selected population if we have space
                 selected_genomes.append(best_genome.copy())
                 selected_tree_boundaries.append(self.tree_boundaries_list[best_idx].copy())
+        
+        # 4. FITNESS: If we still have space, fill remaining slots with best genomes overall
         if len(selected_genomes) < self.population_size:
             sorted_indices = sorted(range(len(self.population)), 
                                 key=lambda i: fitness_values[i], 
                                 reverse=True)
+            
+            # Add best genomes that aren't already selected
             for idx in sorted_indices:
                 genome = self.population[idx]
+                
+                # Check if this genome is already included (simple object identity check)
                 already_included = False
                 for g in selected_genomes:
                     if id(genome) == id(g):  # Simple identity check
                         already_included = True
                         break
+                        
+                # Add if not already included and we have space
                 if not already_included and len(selected_genomes) < self.population_size:
                     selected_genomes.append(genome.copy())
                     selected_tree_boundaries.append(self.tree_boundaries_list[idx].copy())
+        
+        # Ensure we don't exceed population size (should never happen with proper checks above)
         if len(selected_genomes) > self.population_size:
             selected_genomes = selected_genomes[:self.population_size]
             selected_tree_boundaries = selected_tree_boundaries[:self.population_size]
+        
+        # Print structure diversity information
         signatures = [self._get_structure_signature(g) for g in selected_genomes]
         unique_signatures = set(signatures)
         print(f"Population has {len(unique_signatures)} different structures")
@@ -367,9 +455,13 @@ class EANT:
         protection_period = 3
         for generation in range(generations):
             print(f"\n{'='*20} Generation {generation+1}/{generations} {'='*20}")
+            
+            # Evaluate population
             print("Evaluating population...")
             mse_values = self.evaluate_population(X, y)
             current_best_fitness = -min(mse_values)
+            
+            # Update best genome and fitness history
             best_idx = mse_values.index(min(mse_values))
             if not self.best_genome or current_best_fitness > self.best_fitness:
                 self.best_fitness = current_best_fitness
@@ -378,16 +470,26 @@ class EANT:
                 print(f"New best fitness: {self.best_fitness:.6f}")
             else:
                 print(f"Best fitness so far: {self.best_fitness:.6f}")
+            
+            # Add current best fitness to history
             self.fitness_history.append(current_best_fitness)
+            
+            # Skip mutation on the last generation
             if generation == generations - 1:
                 print("Maximum generations reached")
                 break
             if not self.should_explore():  
                 print("\nStructural Exploitation: Parametric mutation")
+                
+                # Perform parametric mutation based on fitness-proportional clusters
                 fitness_values = {genome: -mse for genome, mse in zip(self.population, mse_values)}
                 mutated_population = self.parametric_mutation(self.population, fitness_values)
+                
+                # Set as current population for evaluation
                 self.population = mutated_population
                 self.tree_boundaries_list = [genome.find_tree_boundaries() for genome in self.population]
+                
+                # Evaluate and select from the parametrically mutated population
                 mutated_mse = self.evaluate_population(X, y)
                 self.population, self.tree_boundaries_list = self.selection(mutated_mse)
             
@@ -395,11 +497,15 @@ class EANT:
                 print("\nStructural Exploration: Creating new individuals through structural mutation")
                 new_population = []
                 new_tree_boundaries = []
+                
+                # Apply structural mutation to each genome
                 for i, genome in enumerate(self.population):
                     old_signature = self._get_structure_signature(genome)
                     mutated_genome = self.structural_mutation(genome)
                     new_signature = self._get_structure_signature(mutated_genome)
                     mutated_boundaries = mutated_genome.find_tree_boundaries()
+                    
+                    # If structure changed, protect it
                     if new_signature != old_signature:
                         self.protected_genomes.append(mutated_genome)
                         self.protected_tree_boundaries.append(mutated_boundaries)
@@ -408,10 +514,16 @@ class EANT:
                     
                     new_population.append(mutated_genome)
                     new_tree_boundaries.append(mutated_boundaries)
+                
+                # Update population with structurally mutated genomes
                 self.population = new_population
                 self.tree_boundaries_list = new_tree_boundaries
+                
+                # Evaluate and select from the structurally mutated population
                 structural_mse = self.evaluate_population(X, y)
                 self.population, self.tree_boundaries_list = self.selection(structural_mse)
+            
+            # Print population structure diversity
             signatures = [self._get_structure_signature(g) for g in self.population]
             unique_signatures = set(signatures)
             print(f"Population has {len(unique_signatures)} different structures")
