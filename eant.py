@@ -30,6 +30,7 @@ class EANT:
         self.improvement_threshold = 0.01  
         self.fitness_history = [] 
         
+        
     def initialize_minimal_population(self) -> None:
         """Initialize population with minimal networks"""
         self.population = []

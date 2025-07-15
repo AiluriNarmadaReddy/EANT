@@ -24,8 +24,8 @@ class EANT:
         self.input_count = input_count
         self.output_count = output_count
         self.evaluations = 0
-        self.mutation_prob = 0.4
-        self.structural_mutation_prob = 0.4
+        self.mutation_prob = 0.6
+        self.structural_mutation_prob = 0.6
         self.structural_mutation_prob_start = 0.2
 
         self.buffer_length = 5        # How many generations to look back
@@ -33,7 +33,7 @@ class EANT:
         self.fitness_history = [] 
         
         # Parameters for self-adaptive mutation
-        self.min_sigma = 0.01  # ε₀ value from equation 2.6
+        self.min_sigma = 0.01  
         self.initial_sigma = 0.5  # Initial step size
 
     def initialize_minimal_population(self) -> None:
@@ -167,15 +167,9 @@ class EANT:
         for i in range(len(genome.genes)):
             # Generate individual random factor
             individual_factor = np.random.normal(0, 1)
-            
-            # Update sigma according to equation 2.4
             genome.sigmas[i] *= math.exp(tau_prime * global_factor + tau * individual_factor)
-            
-            # Apply boundary rule (equation 2.6)
             if genome.sigmas[i] < self.min_sigma:
                 genome.sigmas[i] = self.min_sigma
-            
-            # Apply mutation to weights according to equation 2.5
             if random.random() < self.mutation_prob:
                 current_weight = genome.genes[i].get_weight()
                 random_factor = np.random.normal(0, 1)
